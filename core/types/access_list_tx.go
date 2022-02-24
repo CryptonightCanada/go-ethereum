@@ -22,7 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-//go:generate gencodec -type AccessTuple -out gen_access_tuple.go
+//go:generate go run github.com/fjl/gencodec@latest -type AccessTuple -out gen_access_tuple.go
 
 // AccessList is an EIP-2930 access list.
 type AccessList []AccessTuple
@@ -59,7 +59,7 @@ type AccessListTx struct {
 func (tx *AccessListTx) copy() TxData {
 	cpy := &AccessListTx{
 		Nonce: tx.Nonce,
-		To:    tx.To, // TODO: copy pointed-to address
+		To:    copyAddressPtr(tx.To),
 		Data:  common.CopyBytes(tx.Data),
 		Gas:   tx.Gas,
 		// These are copied below.
@@ -96,7 +96,6 @@ func (tx *AccessListTx) copy() TxData {
 // accessors for innerTx.
 func (tx *AccessListTx) txType() byte           { return AccessListTxType }
 func (tx *AccessListTx) chainID() *big.Int      { return tx.ChainID }
-func (tx *AccessListTx) protected() bool        { return true }
 func (tx *AccessListTx) accessList() AccessList { return tx.AccessList }
 func (tx *AccessListTx) data() []byte           { return tx.Data }
 func (tx *AccessListTx) gas() uint64            { return tx.Gas }

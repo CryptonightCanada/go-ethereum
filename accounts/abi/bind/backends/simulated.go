@@ -230,6 +230,9 @@ func (b *SimulatedBackend) TransactionReceipt(ctx context.Context, txHash common
 	defer b.mu.Unlock()
 
 	receipt, _, _, _ := rawdb.ReadReceipt(b.database, txHash, b.config)
+	if receipt == nil {
+		return nil, ethereum.NotFound
+	}
 	return receipt, nil
 }
 
@@ -462,6 +465,12 @@ func (b *SimulatedBackend) PendingNonceAt(ctx context.Context, account common.Ad
 // SuggestGasPrice implements ContractTransactor.SuggestGasPrice. Since the simulated
 // chain doesn't have miners, we just return a gas price of 1 for any call.
 func (b *SimulatedBackend) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.pendingBlock.Header().BaseFee != nil {
+		return b.pendingBlock.Header().BaseFee, nil
+	}
 	return big.NewInt(1), nil
 }
 
@@ -488,8 +497,19 @@ func (b *SimulatedBackend) EstimateGas(ctx context.Context, call ethereum.CallMs
 	} else {
 		hi = b.pendingBlock.GasLimit()
 	}
+	// Normalize the max fee per gas the call is willing to spend.
+	var feeCap *big.Int
+	if call.GasPrice != nil && (call.GasFeeCap != nil || call.GasTipCap != nil) {
+		return 0, errors.New("both gasPrice and (maxFeePerGas or maxPriorityFeePerGas) specified")
+	} else if call.GasPrice != nil {
+		feeCap = call.GasPrice
+	} else if call.GasFeeCap != nil {
+		feeCap = call.GasFeeCap
+	} else {
+		feeCap = common.Big0
+	}
 	// Recap the highest gas allowance with account's balance.
-	if call.GasPrice != nil && call.GasPrice.BitLen() != 0 {
+	if feeCap.BitLen() != 0 {
 		balance := b.pendingState.GetBalance(call.From) // from can't be nil
 		available := new(big.Int).Set(balance)
 		if call.Value != nil {
@@ -498,14 +518,14 @@ func (b *SimulatedBackend) EstimateGas(ctx context.Context, call ethereum.CallMs
 			}
 			available.Sub(available, call.Value)
 		}
-		allowance := new(big.Int).Div(available, call.GasPrice)
+		allowance := new(big.Int).Div(available, feeCap)
 		if allowance.IsUint64() && hi > allowance.Uint64() {
 			transfer := call.Value
 			if transfer == nil {
 				transfer = new(big.Int)
 			}
 			log.Warn("Gas estimation capped by limited funds", "original", hi, "balance", balance,
-				"sent", transfer, "gasprice", call.GasPrice, "fundable", allowance)
+				"sent", transfer, "feecap", feeCap, "fundable", allowance)
 			hi = allowance.Uint64()
 		}
 	}
@@ -622,7 +642,6 @@ func (b *SimulatedBackend) callContract(ctx context.Context, call ethereum.CallM
 }
 
 // SendTransaction updates the pending block to include the given transaction.
-// It panics if the transaction is invalid.
 func (b *SimulatedBackend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -630,17 +649,17 @@ func (b *SimulatedBackend) SendTransaction(ctx context.Context, tx *types.Transa
 	// Get the last block
 	block, err := b.blockByHash(ctx, b.pendingBlock.ParentHash())
 	if err != nil {
-		panic("could not fetch parent")
+		return fmt.Errorf("could not fetch parent")
 	}
 	// Check transaction validity
 	signer := types.MakeSigner(b.blockchain.Config(), block.Number())
 	sender, err := types.Sender(signer, tx)
 	if err != nil {
-		panic(fmt.Errorf("invalid transaction: %v", err))
+		return fmt.Errorf("invalid transaction: %v", err)
 	}
 	nonce := b.pendingState.GetNonce(sender)
 	if tx.Nonce() != nonce {
-		panic(fmt.Errorf("invalid transaction nonce: got %d, want %d", tx.Nonce(), nonce))
+		return fmt.Errorf("invalid transaction nonce: got %d, want %d", tx.Nonce(), nonce)
 	}
 	// Include tx in chain
 	blocks, _ := core.GenerateChain(b.config, block, ethash.NewFaker(), b.database, 1, func(number int, block *core.BlockGen) {
@@ -784,7 +803,7 @@ type callMsg struct {
 
 func (m callMsg) From() common.Address         { return m.CallMsg.From }
 func (m callMsg) Nonce() uint64                { return 0 }
-func (m callMsg) CheckNonce() bool             { return false }
+func (m callMsg) IsFake() bool                 { return true }
 func (m callMsg) To() *common.Address          { return m.CallMsg.To }
 func (m callMsg) GasPrice() *big.Int           { return m.CallMsg.GasPrice }
 func (m callMsg) GasFeeCap() *big.Int          { return m.CallMsg.GasFeeCap }

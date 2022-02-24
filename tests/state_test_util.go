@@ -65,9 +65,11 @@ type stJSON struct {
 }
 
 type stPostState struct {
-	Root    common.UnprefixedHash `json:"hash"`
-	Logs    common.UnprefixedHash `json:"logs"`
-	Indexes struct {
+	Root            common.UnprefixedHash `json:"hash"`
+	Logs            common.UnprefixedHash `json:"logs"`
+	TxBytes         hexutil.Bytes         `json:"txbytes"`
+	ExpectException string                `json:"expectException"`
+	Indexes         struct {
 		Data  int `json:"data"`
 		Gas   int `json:"gas"`
 		Value int `json:"value"`
@@ -78,16 +80,18 @@ type stPostState struct {
 
 type stEnv struct {
 	Coinbase   common.Address `json:"currentCoinbase"   gencodec:"required"`
-	Difficulty *big.Int       `json:"currentDifficulty" gencodec:"required"`
+	Difficulty *big.Int       `json:"currentDifficulty" gencodec:"optional"`
+	Random     *big.Int       `json:"currentRandom"     gencodec:"optional"`
 	GasLimit   uint64         `json:"currentGasLimit"   gencodec:"required"`
 	Number     uint64         `json:"currentNumber"     gencodec:"required"`
 	Timestamp  uint64         `json:"currentTimestamp"  gencodec:"required"`
-	BaseFee    *big.Int       `json:"currentBaseFee"  gencodec:"optional"`
+	BaseFee    *big.Int       `json:"currentBaseFee"    gencodec:"optional"`
 }
 
 type stEnvMarshaling struct {
 	Coinbase   common.UnprefixedAddress
 	Difficulty *math.HexOrDecimal256
+	Random     *math.HexOrDecimal256
 	GasLimit   math.HexOrDecimal64
 	Number     math.HexOrDecimal64
 	Timestamp  math.HexOrDecimal64
@@ -198,13 +202,30 @@ func (t *StateTest) RunNoVerify(subtest StateSubtest, vmconfig vm.Config, snapsh
 		return nil, nil, common.Hash{}, err
 	}
 
+	// Try to recover tx with current signer
+	if len(post.TxBytes) != 0 {
+		var ttx types.Transaction
+		err := ttx.UnmarshalBinary(post.TxBytes)
+		if err != nil {
+			return nil, nil, common.Hash{}, err
+		}
+
+		if _, err := types.Sender(types.LatestSigner(config), &ttx); err != nil {
+			return nil, nil, common.Hash{}, err
+		}
+	}
+
 	// Prepare the EVM.
 	txContext := core.NewEVMTxContext(msg)
 	context := core.NewEVMBlockContext(block.Header(), nil, &t.json.Env.Coinbase)
 	context.GetHash = vmTestBlockHash
 	context.BaseFee = baseFee
+	if t.json.Env.Random != nil {
+		rnd := common.BigToHash(t.json.Env.Random)
+		context.Random = &rnd
+		context.Difficulty = big.NewInt(0)
+	}
 	evm := vm.NewEVM(context, txContext, statedb, config, vmconfig)
-
 	// Execute the message.
 	snapshot := statedb.Snapshot()
 	gaspool := new(core.GasPool)
@@ -253,7 +274,7 @@ func MakePreState(db ethdb.Database, accounts core.GenesisAlloc, snapshotter boo
 }
 
 func (t *StateTest) genesis(config *params.ChainConfig) *core.Genesis {
-	return &core.Genesis{
+	genesis := &core.Genesis{
 		Config:     config,
 		Coinbase:   t.json.Env.Coinbase,
 		Difficulty: t.json.Env.Difficulty,
@@ -262,6 +283,12 @@ func (t *StateTest) genesis(config *params.ChainConfig) *core.Genesis {
 		Timestamp:  t.json.Env.Timestamp,
 		Alloc:      t.json.Pre,
 	}
+	if t.json.Env.Random != nil {
+		// Post-Merge
+		genesis.Mixhash = common.BigToHash(t.json.Env.Random)
+		genesis.Difficulty = big.NewInt(0)
+	}
+	return genesis
 }
 
 func (tx *stTransaction) toMessage(ps stPostState, baseFee *big.Int) (core.Message, error) {
@@ -333,7 +360,7 @@ func (tx *stTransaction) toMessage(ps stPostState, baseFee *big.Int) (core.Messa
 	}
 
 	msg := types.NewMessage(from, to, tx.Nonce, value, gasLimit, gasPrice,
-		tx.MaxFeePerGas, tx.MaxPriorityFeePerGas, data, accessList, true)
+		tx.MaxFeePerGas, tx.MaxPriorityFeePerGas, data, accessList, false)
 	return msg, nil
 }
 
@@ -342,4 +369,8 @@ func rlpHash(x interface{}) (h common.Hash) {
 	rlp.Encode(hw, x)
 	hw.Sum(h[:0])
 	return h
+}
+
+func vmTestBlockHash(n uint64) common.Hash {
+	return common.BytesToHash(crypto.Keccak256([]byte(big.NewInt(int64(n)).String())))
 }

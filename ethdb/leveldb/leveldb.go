@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
+//go:build !js
 // +build !js
 
 // Package leveldb implements the key-value database layer based on LevelDB.
@@ -209,6 +210,14 @@ func (db *Database) NewBatch() ethdb.Batch {
 	return &batch{
 		db: db.db,
 		b:  new(leveldb.Batch),
+	}
+}
+
+// NewBatchWithSize creates a write-only database batch with pre-allocated buffer.
+func (db *Database) NewBatchWithSize(size int) ethdb.Batch {
+	return &batch{
+		db: db.db,
+		b:  leveldb.MakeBatch(size),
 	}
 }
 
@@ -454,7 +463,7 @@ type batch struct {
 // Put inserts the given value into the batch for later committing.
 func (b *batch) Put(key, value []byte) error {
 	b.b.Put(key, value)
-	b.size += len(value)
+	b.size += len(key) + len(value)
 	return nil
 }
 
